@@ -14,6 +14,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.text.SimpleDateFormat
+import java.text.Normalizer
 import java.util.Date
 import java.util.Locale
 import kotlin.math.exp
@@ -308,20 +309,36 @@ class MainActivity : Activity() {
     }
 
     private fun footballdataArray(json: JSONObject): JSONArray {
-        val data = json.opt("data")
-        if (data is JSONArray) return data
-        if (data is JSONObject) {
-            data.optJSONArray("matches")?.let { return it }
-            data.optJSONArray("teams")?.let { return it }
-            data.optJSONArray("results")?.let { return it }
-        }
+        // API yanıtları bazı endpointlerde data: [], bazılarında data: {matches: []}
+        // ve bazı sürümlerde data.results.* biçiminde gelebiliyor. İç içe yapıları da tara.
+        json.optJSONArray("data")?.let { return it }
         json.optJSONArray("response")?.let { return it }
+        val data = json.optJSONObject("data")
+        val root = data ?: json
+        val preferredKeys = listOf("matches", "teams", "results", "fixtures", "items")
+        for (key in preferredKeys) root.optJSONArray(key)?.let { return it }
+        for (key in preferredKeys) {
+            val child = root.optJSONObject(key)
+            if (child != null) {
+                for (nestedKey in preferredKeys) child.optJSONArray(nestedKey)?.let { return it }
+            }
+        }
+        // Bazı cevaplarda data.results bir nesne, onun içinde teams/matches bulunur.
+        val resultsObject = root.optJSONObject("results")
+        if (resultsObject != null) {
+            for (key in preferredKeys) resultsObject.optJSONArray(key)?.let { return it }
+        }
         return JSONArray()
     }
 
-    private fun cleanTeamName(name: String): String = name.lowercase(Locale.ROOT)
-        .replace(Regex("[^a-z0-9]"), "")
-        .replace("footballclub", "").replace("fc", "")
+    private fun cleanTeamName(name: String): String {
+        val ascii = Normalizer.normalize(name.lowercase(Locale.ROOT), Normalizer.Form.NFD)
+            .replace(Regex("\\p{Mn}+"), "")
+            .replace("ı", "i")
+        return ascii.replace(Regex("[^a-z0-9]"), "")
+            .replace("footballclub", "").replace("club", "").replace("fc", "")
+            .replace("afc", "").replace("cf", "")
+    }
 
     private fun footballdataTeamStats(teamName: String, key: String): Stats {
         val encoded = URLEncoder.encode(teamName, "UTF-8")

@@ -157,20 +157,20 @@ class MainActivity : Activity() {
                     var primaryProblem = ""
                     try {
                         val homeRecent = apiGet(
-                            "https://v3.football.api-sports.io/fixtures?team=$homeId&last=5&season=$season&status=FT,AET,PEN&timezone=Europe%2FIstanbul",
+                            "https://v3.football.api-sports.io/fixtures?team=$homeId&last=20&season=$season&timezone=Europe%2FIstanbul",
                             key
                         ).optJSONArray("response") ?: JSONArray()
                         val awayRecent = apiGet(
-                            "https://v3.football.api-sports.io/fixtures?team=$awayId&last=5&season=$season&status=FT,AET,PEN&timezone=Europe%2FIstanbul",
+                            "https://v3.football.api-sports.io/fixtures?team=$awayId&last=20&season=$season&timezone=Europe%2FIstanbul",
                             key
                         ).optJSONArray("response") ?: JSONArray()
                         hs = teamStats(homeRecent, homeId)
                         as_ = teamStats(awayRecent, awayId)
-                        if (hs!!.count == 0 || as_!!.count == 0) primaryProblem = "API-Football geçmiş sezon verisi döndürmedi."
+                        if (hs!!.count < 3 || as_!!.count < 3) primaryProblem = "API-Football en az 3 geçerli geçmiş maç sağlayamadı."
                     } catch (e: Exception) {
                         primaryProblem = e.message ?: "API-Football geçmiş maç isteği başarısız oldu."
                     }
-                    if ((hs?.count ?: 0) == 0 || (as_?.count ?: 0) == 0) {
+                    if ((hs?.count ?: 0) < 3 || (as_?.count ?: 0) < 3) {
                         if (secondKey.isBlank()) {
                             throw IllegalStateException("API-Football bu sezon için geçmiş maç verisi vermedi. Hibrit analiz için API Ayarı bölümüne Footballdata.io API anahtarını da girin. Ayrıntı: $primaryProblem")
                         }
@@ -178,10 +178,10 @@ class MainActivity : Activity() {
                         as_ = footballdataTeamStats(awayName, secondKey)
                         source = "Footballdata.io (geçmiş sonuçlar)"
                     }
-                    val homeStats = hs ?: Stats(0.0, 0.0, 0, "Veri yok")
-                    val awayStats = as_ ?: Stats(0.0, 0.0, 0, "Veri yok")
-                    if (homeStats.count == 0 || awayStats.count == 0) {
-                        val message = "Analiz için yeterli tamamlanmış maç verisi bulunamadı.\nEv sahibi: ${homeStats.count} maç, deplasman: ${awayStats.count} maç.\nİkinci API'nin lig kapsamını ve takım adlarını kontrol edin."
+                    val homeStats = hs ?: emptyStats()
+                    val awayStats = as_ ?: emptyStats()
+                    if (homeStats.count < 3 || awayStats.count < 3) {
+                        val message = "Güvenilir analiz için yeterli doğrulanmış geçmiş maç verisi bulunamadı.\nEv sahibi: ${homeStats.count} maç, deplasman: ${awayStats.count} maç.\nEn az 3 tamamlanmış maç gerekir. Bu durumda tahmin üretmek yerine veri kapsamını kontrol edin.\nKaynak ayrıntısı: $primaryProblem"
                         runOnUiThread { result.text = message; save.isEnabled = false; analyze.isEnabled = true; analyze.text = "Tekrar dene" }
                     } else {
                         val analysis = calculatePrediction(homeStats, awayStats) + "\nVeri kaynağı: $source"
@@ -194,42 +194,74 @@ class MainActivity : Activity() {
         }
     }
 
-    private data class Stats(val scored: Double, val conceded: Double, val count: Int, val form: String)
+    private data class Stats(
+        val scored: Double, val conceded: Double, val count: Int, val form: String,
+        val homeScored: Double, val homeConceded: Double, val homeCount: Int,
+        val awayScored: Double, val awayConceded: Double, val awayCount: Int
+    )
 
     private fun teamStats(matches: JSONArray, teamId: Int): Stats {
-        var scored = 0.0; var conceded = 0.0; var count = 0; val form = StringBuilder()
-        for (i in 0 until matches.length()) {
-            val m = matches.optJSONObject(i) ?: continue
+        val ordered = (0 until matches.length()).mapNotNull { matches.optJSONObject(it) }
+            .sortedByDescending { it.optJSONObject("fixture")?.optString("date", "") ?: "" }
+        var scored = 0.0; var conceded = 0.0; var count = 0
+        var homeScored = 0.0; var homeConceded = 0.0; var homeCount = 0
+        var awayScored = 0.0; var awayConceded = 0.0; var awayCount = 0
+        val form = StringBuilder()
+        for (m in ordered) {
+            val fixture = m.optJSONObject("fixture") ?: continue
+            val status = fixture.optJSONObject("status")?.optString("short", "") ?: ""
+            if (status !in setOf("FT", "AET", "PEN")) continue
             val teams = m.optJSONObject("teams") ?: continue
             val goals = m.optJSONObject("goals") ?: continue
-            val h = teams.optJSONObject("home") ?: continue; val a = teams.optJSONObject("away") ?: continue
+            val h = teams.optJSONObject("home") ?: continue
+            val a = teams.optJSONObject("away") ?: continue
+            val homeId = h.optInt("id", -1); val awayId = a.optInt("id", -1)
+            if (homeId != teamId && awayId != teamId) continue
             val hg = goals.optInt("home", -1); val ag = goals.optInt("away", -1)
             if (hg < 0 || ag < 0) continue
-            val isHome = h.optInt("id") == teamId
-            val forGoals = if (isHome) hg else ag; val against = if (isHome) ag else hg
+            val isHome = homeId == teamId
+            val forGoals = if (isHome) hg else ag
+            val against = if (isHome) ag else hg
             scored += forGoals; conceded += against; count++
-            val outcome = if (forGoals > against) "G" else if (forGoals == against) "B" else "M"
-            form.append(outcome).append(" ")
+            if (isHome) { homeScored += forGoals; homeConceded += against; homeCount++ }
+            else { awayScored += forGoals; awayConceded += against; awayCount++ }
+            form.append(if (forGoals > against) "G" else if (forGoals == against) "B" else "M").append(" ")
+            if (count >= 10) break
         }
-        if (count == 0) return Stats(1.25, 1.25, 0, "Veri yok")
-        return Stats(scored / count, conceded / count, count, form.toString().trim())
+        if (count == 0) return emptyStats()
+        return Stats(scored / count, conceded / count, count, form.toString().trim(),
+            if (homeCount > 0) homeScored / homeCount else scored / count,
+            if (homeCount > 0) homeConceded / homeCount else conceded / count, homeCount,
+            if (awayCount > 0) awayScored / awayCount else scored / count,
+            if (awayCount > 0) awayConceded / awayCount else conceded / count, awayCount)
     }
 
+    private fun emptyStats() = Stats(0.0, 0.0, 0, "Veri yok", 0.0, 0.0, 0, 0.0, 0.0, 0)
+
     private fun calculatePrediction(home: Stats, away: Stats): String {
-        val lh = (home.scored * 0.55 + away.conceded * 0.45).coerceIn(0.15, 4.0)
-        val la = (away.scored * 0.55 + home.conceded * 0.45).coerceIn(0.15, 4.0)
-        val hp = DoubleArray(8) { poisson(lh, it) }; val ap = DoubleArray(8) { poisson(la, it) }
+        // Prefer home team's home record and away team's away record when at least two samples exist.
+        val homeAttack = if (home.homeCount >= 2) home.homeScored else home.scored
+        val homeDefense = if (home.homeCount >= 2) home.homeConceded else home.conceded
+        val awayAttack = if (away.awayCount >= 2) away.awayScored else away.scored
+        val awayDefense = if (away.awayCount >= 2) away.awayConceded else away.conceded
+        val lh = (homeAttack * 0.55 + awayDefense * 0.45 + 0.12).coerceIn(0.15, 3.8)
+        val la = (awayAttack * 0.55 + homeDefense * 0.45 - 0.05).coerceIn(0.15, 3.8)
+        val hp = DoubleArray(9) { poisson(lh, it) }; val ap = DoubleArray(9) { poisson(la, it) }
         var p1 = 0.0; var px = 0.0; var p2 = 0.0; var over = 0.0; var btts = 0.0; var best = 0.0; var score = "0-0"
-        for (h in 0..7) for (a in 0..7) {
+        for (h in 0..8) for (a in 0..8) {
             val p = hp[h] * ap[a]
             if (h > a) p1 += p else if (h == a) px += p else p2 += p
             if (h + a >= 3) over += p
             if (h > 0 && a > 0) btts += p
             if (p > best) { best = p; score = "$h-$a" }
         }
-        val outcome = if (p1 >= px && p1 >= p2) "1" else if (p2 >= p1 && p2 >= px) "2" else "X"
-        fun pct(v: Double) = "%.0f%%".format(Locale.US, v * 100)
-        return "Maç sonucu: $outcome\n1: ${pct(p1)}   X: ${pct(px)}   2: ${pct(p2)}\n2,5 üst: ${pct(over)}   Karşılıklı gol: ${pct(btts)}\nEn olası skor: $score\nSon 5 maç gol ort. — Ev sahibi: ${"%.2f".format(Locale.US, home.scored)} atılan / ${"%.2f".format(Locale.US, home.conceded)} yenilen (${home.count} maç)\nDeplasman: ${"%.2f".format(Locale.US, away.scored)} atılan / ${"%.2f".format(Locale.US, away.conceded)} yenilen (${away.count} maç)\nForm (G: galibiyet, B: beraberlik, M: mağlubiyet): ${home.form} | ${away.form}\nModel: son maçların gol ortalamalarına dayalı Poisson tahmini; kesinlik veya garanti içermez."
+        // Normalize outcome probabilities so 1/X/2 add up to 100% despite finite score range.
+        val total = (p1 + px + p2).coerceAtLeast(0.000001)
+        p1 /= total; px /= total; p2 /= total
+        fun pct(v: Double) = "%.0f%%".format(Locale.US, v.coerceIn(0.0, 1.0) * 100)
+        val sampleNote = if (home.count < 5 || away.count < 5) "\nUyarı: En az bir takımda 5'ten az maç var; tahmin güveni düşüktür." else ""
+        val venueNote = "\nEv sahibinin iç saha örneği: ${home.homeCount} maç; deplasmanın dış saha örneği: ${away.awayCount} maç."
+        return "Maç sonucu: ${if (p1 >= px && p1 >= p2) "1" else if (p2 >= p1 && p2 >= px) "2" else "X"}\n1: ${pct(p1)}   X: ${pct(px)}   2: ${pct(p2)}\n2,5 üst: ${pct(over)}   Karşılıklı gol: ${pct(btts)}\nEn olası skor: $score\nSon ${home.count} maç ortalaması — Ev sahibi: ${"%.2f".format(Locale.US, home.scored)} atılan / ${"%.2f".format(Locale.US, home.conceded)} yenilen\nSon ${away.count} maç ortalaması — Deplasman: ${"%.2f".format(Locale.US, away.scored)} atılan / ${"%.2f".format(Locale.US, away.conceded)} yenilen\nForm (G: galibiyet, B: beraberlik, M: mağlubiyet): ${home.form} | ${away.form}$venueNote$sampleNote\nModel: son tamamlanmış maçların skorlarından üretilen basit Poisson tahmini; kesinlik veya garanti içermez."
     }
 
     private fun poisson(lambda: Double, k: Int): Double {
@@ -347,49 +379,67 @@ class MainActivity : Activity() {
         val target = cleanTeamName(teamName)
         var best: JSONObject? = null
         var bestScore = 0
+        var exactMatches = 0
         for (i in 0 until candidates.length()) {
             val team = candidates.optJSONObject(i) ?: continue
-            val names = listOf(team.optString("team_name"), team.optString("team_name_clean"), team.optString("team_name_english"), team.optString("name"), team.optString("short_name"))
-                .filter { it.isNotBlank() }
+            val names = listOf("team_name", "team_name_clean", "team_name_english", "name", "short_name")
+                .map { team.optString(it, "") }.filter { it.isNotBlank() && it != "null" }
             val score = names.maxOfOrNull { candidateName ->
                 val candidate = cleanTeamName(candidateName)
                 when {
                     candidate == target -> 100
-                    candidate.length >= 5 && target.length >= 5 && (candidate.contains(target) || target.contains(candidate)) -> 60
+                    candidate.length >= 6 && target.length >= 6 && (candidate.startsWith(target) || target.startsWith(candidate)) -> 70
                     else -> 0
                 }
             } ?: 0
+            if (score == 100) exactMatches++
             if (score > bestScore) { bestScore = score; best = team }
         }
-        val team = best ?: throw IllegalStateException("Footballdata.io içinde '$teamName' takımı bulunamadı. Ücretsiz planın lig kapsamını kontrol edin.")
-        if (bestScore < 60) throw IllegalStateException("Footballdata.io takım eşleşmesi doğrulanamadı: $teamName")
+        val team = best ?: throw IllegalStateException("Footballdata.io içinde '$teamName' takımı bulunamadı. Lig kapsamını kontrol edin.")
+        if (bestScore < 70) throw IllegalStateException("Footballdata.io takım eşleşmesi güvenilir değil: $teamName")
+        if (bestScore == 100 && exactMatches > 1) throw IllegalStateException("Footballdata.io içinde '$teamName' adıyla birden fazla takım bulundu; yanlış takımı seçmemek için analiz durduruldu.")
         val publicId = team.optInt("team_id", team.optInt("id", 0))
         if (publicId <= 0) throw IllegalStateException("Footballdata.io takım kimliği alınamadı: $teamName")
-        val matchesJson = footballdataGet("https://footballdata.io/api/v1/teams/$publicId/matches?limit=25", key)
+        val matchesJson = footballdataGet("https://footballdata.io/api/v1/teams/$publicId/matches?limit=100", key)
         val matches = footballdataArray(matchesJson)
+        val ordered = (0 until matches.length()).mapNotNull { matches.optJSONObject(it) }
+            .sortedByDescending { it.optString("match_date", it.optString("date", "")) }
         var scored = 0.0; var conceded = 0.0; var count = 0
+        var homeScored = 0.0; var homeConceded = 0.0; var homeCount = 0
+        var awayScored = 0.0; var awayConceded = 0.0; var awayCount = 0
         val form = StringBuilder()
-        for (i in 0 until matches.length()) {
-            val match = matches.optJSONObject(i) ?: continue
+        for (match in ordered) {
             val home = match.optJSONObject("home_team") ?: JSONObject()
             val away = match.optJSONObject("away_team") ?: JSONObject()
             val score = match.optJSONObject("score") ?: JSONObject()
             val homeGoals = score.optInt("home", -1); val awayGoals = score.optInt("away", -1)
             if (homeGoals < 0 || awayGoals < 0) continue
-            val status = match.optString("status", "").lowercase(Locale.ROOT)
-            if (status in listOf("scheduled", "upcoming", "not started", "live", "in_progress")) continue
-            val matchTeamId = home.optInt("team_id", -1).takeIf { it > 0 }
-                ?: away.optInt("team_id", -1).takeIf { it > 0 }
-            val isHome = if (matchTeamId != null) home.optInt("team_id", -1) == publicId
-                else cleanTeamName(home.optString("team_name", home.optString("name"))) == cleanTeamName(teamName)
+            val status = match.optString("status", "").lowercase(Locale.ROOT).replace("-", "_").replace(" ", "_")
+            if (status !in setOf("complete", "completed", "finished", "ft", "full_time", "aet", "pen", "after_extra_time", "after_penalties")) continue
+            val homeId = home.optInt("team_id", home.optInt("id", -1))
+            val awayId = away.optInt("team_id", away.optInt("id", -1))
+            val isHome = when {
+                homeId == publicId -> true
+                awayId == publicId -> false
+                homeId > 0 || awayId > 0 -> continue
+                cleanTeamName(home.optString("team_name", home.optString("name", ""))) == target -> true
+                cleanTeamName(away.optString("team_name", away.optString("name", ""))) == target -> false
+                else -> continue
+            }
             val forGoals = if (isHome) homeGoals else awayGoals
             val against = if (isHome) awayGoals else homeGoals
             scored += forGoals; conceded += against; count++
+            if (isHome) { homeScored += forGoals; homeConceded += against; homeCount++ }
+            else { awayScored += forGoals; awayConceded += against; awayCount++ }
             form.append(if (forGoals > against) "G" else if (forGoals == against) "B" else "M").append(" ")
             if (count >= 10) break
         }
-        if (count == 0) return Stats(0.0, 0.0, 0, "Veri yok")
-        return Stats(scored / count, conceded / count, count, form.toString().trim())
+        if (count == 0) return emptyStats()
+        return Stats(scored / count, conceded / count, count, form.toString().trim(),
+            if (homeCount > 0) homeScored / homeCount else scored / count,
+            if (homeCount > 0) homeConceded / homeCount else conceded / count, homeCount,
+            if (awayCount > 0) awayScored / awayCount else scored / count,
+            if (awayCount > 0) awayConceded / awayCount else conceded / count, awayCount)
     }
 
     private fun apiGet(url: String, key: String): JSONObject {

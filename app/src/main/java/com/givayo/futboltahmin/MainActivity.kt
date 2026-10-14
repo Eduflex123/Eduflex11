@@ -115,6 +115,8 @@ class MainActivity : Activity() {
         val homeName = home.optString("name", "Ev sahibi"); val awayName = away.optString("name", "Deplasman")
         val id = fixture.optInt("id", 0)
         val kickoff = fixture.optString("date", "").replace("T", " ").take(16)
+        // API-Football fixture history requests work more reliably when the season is explicit.
+        val season = league.optInt("season", kickoff.take(4).toIntOrNull() ?: 2026)
         val card = verticalCard()
         card.addView(TextView(this).apply { text = "${league.optString("name", "Lig")} · $kickoff"; textSize = 12f; setTextColor(muted) })
         card.addView(TextView(this).apply { text = "$homeName  -  $awayName"; textSize = 17f; setTextColor(ink); setTypeface(null, Typeface.BOLD); setPadding(0, dp(7), 0, dp(4)) })
@@ -146,11 +148,22 @@ class MainActivity : Activity() {
             analyze.isEnabled = false; analyze.text = "Analiz ediliyor…"; result.text = "Son 5 maçın istatistikleri alınıyor…"
             Thread {
                 try {
-                    val homeRecent = apiGet("https://v3.football.api-sports.io/fixtures?team=$homeId&last=5", key).optJSONArray("response") ?: JSONArray()
-                    val awayRecent = apiGet("https://v3.football.api-sports.io/fixtures?team=$awayId&last=5", key).optJSONArray("response") ?: JSONArray()
+                    val homeRecent = apiGet(
+                        "https://v3.football.api-sports.io/fixtures?team=$homeId&last=5&season=$season&status=FT,AET,PEN&timezone=Europe%2FIstanbul",
+                        key
+                    ).optJSONArray("response") ?: JSONArray()
+                    val awayRecent = apiGet(
+                        "https://v3.football.api-sports.io/fixtures?team=$awayId&last=5&season=$season&status=FT,AET,PEN&timezone=Europe%2FIstanbul",
+                        key
+                    ).optJSONArray("response") ?: JSONArray()
                     val hs = teamStats(homeRecent, homeId); val as_ = teamStats(awayRecent, awayId)
-                    val analysis = calculatePrediction(hs, as_)
-                    runOnUiThread { result.text = analysis; save.isEnabled = true; analyze.isEnabled = true; analyze.text = "Yeniden analiz et" }
+                    if (hs.count == 0 || as_.count == 0) {
+                        val message = "Analiz için yeterli tamamlanmış maç verisi bulunamadı.\nEv sahibi: ${hs.count} maç, deplasman: ${as_.count} maç.\nAPI-Football sezon verisini/kotasını kontrol edin veya daha sonra tekrar deneyin."
+                        runOnUiThread { result.text = message; save.isEnabled = false; analyze.isEnabled = true; analyze.text = "Tekrar dene" }
+                    } else {
+                        val analysis = calculatePrediction(hs, as_)
+                        runOnUiThread { result.text = analysis; save.isEnabled = true; analyze.isEnabled = true; analyze.text = "Yeniden analiz et" }
+                    }
                 } catch (e: Exception) {
                     runOnUiThread { result.text = "Analiz alınamadı: ${e.message ?: "API/bağlantı hatası"}"; analyze.isEnabled = true; analyze.text = "Tekrar dene" }
                 }

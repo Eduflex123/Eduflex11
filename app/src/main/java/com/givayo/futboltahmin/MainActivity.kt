@@ -229,7 +229,7 @@ class MainActivity : Activity() {
             if (count >= 10) break
         }
         if (count == 0) return emptyStats()
-        return Stats(scored / count, conceded / count, count, form.toString().trim(),
+        return Stats(scored / count, conceded / count, count, form.toString().trim().split(Regex("\\s+")).asReversed().joinToString(" "),
             if (homeCount > 0) homeScored / homeCount else scored / count,
             if (homeCount > 0) homeConceded / homeCount else conceded / count, homeCount,
             if (awayCount > 0) awayScored / awayCount else scored / count,
@@ -379,10 +379,10 @@ class MainActivity : Activity() {
         val target = cleanTeamName(teamName)
         var best: JSONObject? = null
         var bestScore = 0
-        var exactMatches = 0
+        val exactIds = mutableSetOf<Int>()
         for (i in 0 until candidates.length()) {
             val team = candidates.optJSONObject(i) ?: continue
-            val names = listOf("team_name", "team_name_clean", "team_name_english", "name", "short_name")
+            val names = listOf("team_name", "team_name_clean", "team_name_english", "full_name", "name", "short_name")
                 .map { team.optString(it, "") }.filter { it.isNotBlank() && it != "null" }
             val score = names.maxOfOrNull { candidateName ->
                 val candidate = cleanTeamName(candidateName)
@@ -392,30 +392,63 @@ class MainActivity : Activity() {
                     else -> 0
                 }
             } ?: 0
-            if (score == 100) exactMatches++
+            val id = team.optInt("team_id", team.optInt("id", 0))
+            if (score == 100 && id > 0) exactIds.add(id)
             if (score > bestScore) { bestScore = score; best = team }
         }
         val team = best ?: throw IllegalStateException("Footballdata.io içinde '$teamName' takımı bulunamadı. Lig kapsamını kontrol edin.")
-        if (bestScore < 70) throw IllegalStateException("Footballdata.io takım eşleşmesi güvenilir değil: $teamName")
-        if (bestScore == 100 && exactMatches > 1) throw IllegalStateException("Footballdata.io içinde '$teamName' adıyla birden fazla takım bulundu; yanlış takımı seçmemek için analiz durduruldu.")
+        if (bestScore < 100) throw IllegalStateException("Footballdata.io takım eşleşmesi yeterince kesin değil: $teamName. Yanlış takımın formu kullanılmadı.")
+        if (exactIds.size > 1) throw IllegalStateException("Footballdata.io içinde '$teamName' adıyla birden fazla takım bulundu; yanlış takımı seçmemek için analiz durduruldu.")
         val publicId = team.optInt("team_id", team.optInt("id", 0))
         if (publicId <= 0) throw IllegalStateException("Footballdata.io takım kimliği alınamadı: $teamName")
+
         val matchesJson = footballdataGet("https://footballdata.io/api/v1/teams/$publicId/matches?limit=100", key)
         val matches = footballdataArray(matchesJson)
+        fun nestedScore(score: JSONObject, directKey: String, root: JSONObject): Int {
+            val direct = score.opt(directKey)
+            if (direct is Number) return direct.toInt()
+            val variants = listOf("full_time", "fullTime", "ft", "final", "regular_time")
+            for (variant in variants) {
+                val obj = score.optJSONObject(variant) ?: continue
+                val v = obj.opt(directKey)
+                if (v is Number) return v.toInt()
+            }
+            val rootKey = if (directKey == "home") "home_score" else "away_score"
+            val rootValue = root.opt(rootKey)
+            return if (rootValue is Number) rootValue.toInt() else -1
+        }
+        fun teamObj(match: JSONObject, side: String): JSONObject =
+            match.optJSONObject("${side}_team") ?: match.optJSONObject(side) ?: JSONObject()
+        fun matchDateKey(match: JSONObject): Long {
+            val unix = match.optLong("date_unix", 0L)
+            if (unix > 0L) return unix
+            val raw = match.optString("match_date", match.optString("date", match.optString("kickoff", "")))
+            return try {
+                // ISO date/time sorts reliably; parsing also handles dates with a time suffix.
+                val fmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply { isLenient = false }
+                val normalized = raw.replace("Z", "").substringBefore('.')
+                (fmt.parse(normalized)?.time ?: SimpleDateFormat("yyyy-MM-dd", Locale.US).parse(raw.take(10))?.time ?: 0L) / 1000L
+            } catch (_: Exception) { 0L }
+        }
         val ordered = (0 until matches.length()).mapNotNull { matches.optJSONObject(it) }
-            .sortedByDescending { it.optString("match_date", it.optString("date", "")) }
+            .distinctBy { it.optString("match_id", it.optString("id", "")) + "|" + it.optString("match_date", it.optString("date", "")) }
+            .sortedByDescending { matchDateKey(it) }
+
         var scored = 0.0; var conceded = 0.0; var count = 0
         var homeScored = 0.0; var homeConceded = 0.0; var homeCount = 0
         var awayScored = 0.0; var awayConceded = 0.0; var awayCount = 0
         val form = StringBuilder()
         for (match in ordered) {
-            val home = match.optJSONObject("home_team") ?: JSONObject()
-            val away = match.optJSONObject("away_team") ?: JSONObject()
-            val score = match.optJSONObject("score") ?: JSONObject()
-            val homeGoals = score.optInt("home", -1); val awayGoals = score.optInt("away", -1)
+            val status = match.optString("status", match.optString("status_short", match.optString("match_status", "")))
+                .lowercase(Locale.ROOT).replace(Regex("[^a-z]"), "")
+            if (status !in setOf("complete", "completed", "finished", "ft", "fulltime", "aet", "pen", "afterextratime", "afterpenalties", "final")) continue
+            val home = teamObj(match, "home")
+            val away = teamObj(match, "away")
+            val score = match.optJSONObject("score") ?: match.optJSONObject("scores") ?: JSONObject()
+            val homeGoals = nestedScore(score, "home", match)
+            val awayGoals = nestedScore(score, "away", match)
             if (homeGoals < 0 || awayGoals < 0) continue
-            val status = match.optString("status", "").lowercase(Locale.ROOT).replace("-", "_").replace(" ", "_")
-            if (status !in setOf("complete", "completed", "finished", "ft", "full_time", "aet", "pen", "after_extra_time", "after_penalties")) continue
+
             val homeId = home.optInt("team_id", home.optInt("id", -1))
             val awayId = away.optInt("team_id", away.optInt("id", -1))
             val isHome = when {
@@ -426,16 +459,19 @@ class MainActivity : Activity() {
                 cleanTeamName(away.optString("team_name", away.optString("name", ""))) == target -> false
                 else -> continue
             }
+            // Do not use rows without a date: their place in the last-ten sequence is unknown.
+            if (matchDateKey(match) <= 0L) continue
             val forGoals = if (isHome) homeGoals else awayGoals
             val against = if (isHome) awayGoals else homeGoals
             scored += forGoals; conceded += against; count++
             if (isHome) { homeScored += forGoals; homeConceded += against; homeCount++ }
             else { awayScored += forGoals; awayConceded += against; awayCount++ }
+            // Order is newest to oldest, matching the selection order of the last completed matches.
             form.append(if (forGoals > against) "G" else if (forGoals == against) "B" else "M").append(" ")
             if (count >= 10) break
         }
-        if (count == 0) return emptyStats()
-        return Stats(scored / count, conceded / count, count, form.toString().trim(),
+        if (count == 0) throw IllegalStateException("Footballdata.io '$teamName' için tarihli, skoru doğrulanmış tamamlanmış maç bulamadı. Güvenilir olmayan form üretilmedi.")
+        return Stats(scored / count, conceded / count, count, form.toString().trim().split(Regex("\\s+")).asReversed().joinToString(" "),
             if (homeCount > 0) homeScored / homeCount else scored / count,
             if (homeCount > 0) homeConceded / homeCount else conceded / count, homeCount,
             if (awayCount > 0) awayScored / awayCount else scored / count,

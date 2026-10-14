@@ -20,9 +20,10 @@ jobs:
 
       - name: Android SDK hazırla
         uses: android-actions/setup-android@v3
-
-      - name: Android SDK paketlerini yükle
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+        with:
+          api-levels: 35
+          build-tools: 35.0.0
+          components: platform-tools
 
       - name: Gradle kur
         uses: gradle/actions/setup-gradle@v4

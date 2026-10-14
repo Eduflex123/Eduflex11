@@ -12,6 +12,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -145,23 +146,44 @@ class MainActivity : Activity() {
         content.addView(card)
         analyze.setOnClickListener {
             if (homeId <= 0 || awayId <= 0) { result.text = "Takım kimlikleri alınamadı."; return@setOnClickListener }
-            analyze.isEnabled = false; analyze.text = "Analiz ediliyor…"; result.text = "Son 5 maçın istatistikleri alınıyor…"
+            analyze.isEnabled = false; analyze.text = "Analiz ediliyor…"; result.text = "Geçmiş maç verileri alınıyor…"
             Thread {
                 try {
-                    val homeRecent = apiGet(
-                        "https://v3.football.api-sports.io/fixtures?team=$homeId&last=5&season=$season&status=FT,AET,PEN&timezone=Europe%2FIstanbul",
-                        key
-                    ).optJSONArray("response") ?: JSONArray()
-                    val awayRecent = apiGet(
-                        "https://v3.football.api-sports.io/fixtures?team=$awayId&last=5&season=$season&status=FT,AET,PEN&timezone=Europe%2FIstanbul",
-                        key
-                    ).optJSONArray("response") ?: JSONArray()
-                    val hs = teamStats(homeRecent, homeId); val as_ = teamStats(awayRecent, awayId)
-                    if (hs.count == 0 || as_.count == 0) {
-                        val message = "Analiz için yeterli tamamlanmış maç verisi bulunamadı.\nEv sahibi: ${hs.count} maç, deplasman: ${as_.count} maç.\nAPI-Football sezon verisini/kotasını kontrol edin veya daha sonra tekrar deneyin."
+                    val secondKey = prefs.getString("footballdata_key", "") ?: ""
+                    var hs: Stats? = null
+                    var as_: Stats? = null
+                    var source = "API-Football"
+                    var primaryProblem = ""
+                    try {
+                        val homeRecent = apiGet(
+                            "https://v3.football.api-sports.io/fixtures?team=$homeId&last=5&season=$season&status=FT,AET,PEN&timezone=Europe%2FIstanbul",
+                            key
+                        ).optJSONArray("response") ?: JSONArray()
+                        val awayRecent = apiGet(
+                            "https://v3.football.api-sports.io/fixtures?team=$awayId&last=5&season=$season&status=FT,AET,PEN&timezone=Europe%2FIstanbul",
+                            key
+                        ).optJSONArray("response") ?: JSONArray()
+                        hs = teamStats(homeRecent, homeId)
+                        as_ = teamStats(awayRecent, awayId)
+                        if (hs!!.count == 0 || as_!!.count == 0) primaryProblem = "API-Football geçmiş sezon verisi döndürmedi."
+                    } catch (e: Exception) {
+                        primaryProblem = e.message ?: "API-Football geçmiş maç isteği başarısız oldu."
+                    }
+                    if ((hs?.count ?: 0) == 0 || (as_?.count ?: 0) == 0) {
+                        if (secondKey.isBlank()) {
+                            throw IllegalStateException("API-Football bu sezon için geçmiş maç verisi vermedi. Hibrit analiz için API Ayarı bölümüne Footballdata.io API anahtarını da girin. Ayrıntı: $primaryProblem")
+                        }
+                        hs = footballdataTeamStats(homeName, secondKey)
+                        as_ = footballdataTeamStats(awayName, secondKey)
+                        source = "Footballdata.io (geçmiş sonuçlar)"
+                    }
+                    val homeStats = hs ?: Stats(0.0, 0.0, 0, "Veri yok")
+                    val awayStats = as_ ?: Stats(0.0, 0.0, 0, "Veri yok")
+                    if (homeStats.count == 0 || awayStats.count == 0) {
+                        val message = "Analiz için yeterli tamamlanmış maç verisi bulunamadı.\nEv sahibi: ${homeStats.count} maç, deplasman: ${awayStats.count} maç.\nİkinci API'nin lig kapsamını ve takım adlarını kontrol edin."
                         runOnUiThread { result.text = message; save.isEnabled = false; analyze.isEnabled = true; analyze.text = "Tekrar dene" }
                     } else {
-                        val analysis = calculatePrediction(hs, as_)
+                        val analysis = calculatePrediction(homeStats, awayStats) + "\nVeri kaynağı: $source"
                         runOnUiThread { result.text = analysis; save.isEnabled = true; analyze.isEnabled = true; analyze.text = "Yeniden analiz et" }
                     }
                 } catch (e: Exception) {
@@ -244,20 +266,113 @@ class MainActivity : Activity() {
     }
 
     private fun showApiKeyDialog(allowCancel: Boolean) {
-        val input = EditText(this).apply { hint = "API-Football anahtarı"; setSingleLine(true); setText(prefs.getString("api_key", "")) }
+        val input = EditText(this).apply { hint = "API-Football anahtarı (gerekli)"; setSingleLine(true); setText(prefs.getString("api_key", "")) }
+        val secondInput = EditText(this).apply { hint = "Footballdata.io anahtarı (isteğe bağlı)"; setSingleLine(true); setText(prefs.getString("footballdata_key", "")) }
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(22), dp(8), dp(22), 0) }
-        box.addView(TextView(this).apply { text = "Canlı fikstür ve takım istatistikleri için API-Football hesabından alınan API anahtarını girin. Sağlayıcının ücretsiz planı ve kotaları değişebilir."; textSize = 14f; setTextColor(ink) })
+        box.addView(TextView(this).apply { text = "API-Football güncel maç listesini sağlar. Geçmiş sezon verisi kısıtlanırsa Footballdata.io anahtarı analiz için yedek kaynak olarak kullanılır. Anahtarlar yalnızca bu cihazda saklanır."; textSize = 14f; setTextColor(ink) })
+        box.addView(TextView(this).apply { text = "API-Football"; textSize = 13f; setTextColor(ink); setPadding(0, dp(12), 0, 0) })
         box.addView(input)
+        box.addView(TextView(this).apply { text = "Footballdata.io (yedek geçmiş maç kaynağı)"; textSize = 13f; setTextColor(ink); setPadding(0, dp(10), 0, 0) })
+        box.addView(secondInput)
         val builder = AlertDialog.Builder(this).setTitle("Veri kaynağı ayarı").setView(box)
             .setPositiveButton("Kaydet", null)
         if (allowCancel) builder.setNegativeButton("İptal", null)
         val dialog = builder.create(); dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val key = input.text.toString().trim()
-                if (key.isBlank()) { input.error = "API anahtarı gerekli"; return@setOnClickListener }
-                prefs.edit().putString("api_key", key).apply(); dialog.dismiss(); showHome()
+                if (key.isBlank()) { input.error = "API-Football anahtarı gerekli"; return@setOnClickListener }
+                prefs.edit()
+                    .putString("api_key", key)
+                    .putString("footballdata_key", secondInput.text.toString().trim())
+                    .apply()
+                dialog.dismiss(); showHome()
             }
         }; dialog.show()
+    }
+
+    private fun footballdataGet(url: String, key: String): JSONObject {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        conn.requestMethod = "GET"; conn.connectTimeout = 15000; conn.readTimeout = 20000
+        conn.setRequestProperty("Authorization", "Bearer $key"); conn.setRequestProperty("Accept", "application/json")
+        try {
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val text = stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val json = JSONObject(text)
+            if (code !in 200..299 || json.optBoolean("success", true).not()) {
+                val detail = json.optString("message", json.optString("error", text.take(250)))
+                throw IllegalStateException("Footballdata.io HTTP $code: $detail")
+            }
+            return json
+        } finally { conn.disconnect() }
+    }
+
+    private fun footballdataArray(json: JSONObject): JSONArray {
+        val data = json.opt("data")
+        if (data is JSONArray) return data
+        if (data is JSONObject) {
+            data.optJSONArray("matches")?.let { return it }
+            data.optJSONArray("teams")?.let { return it }
+            data.optJSONArray("results")?.let { return it }
+        }
+        json.optJSONArray("response")?.let { return it }
+        return JSONArray()
+    }
+
+    private fun cleanTeamName(name: String): String = name.lowercase(Locale.ROOT)
+        .replace(Regex("[^a-z0-9]"), "")
+        .replace("footballclub", "").replace("fc", "")
+
+    private fun footballdataTeamStats(teamName: String, key: String): Stats {
+        val encoded = URLEncoder.encode(teamName, "UTF-8")
+        val search = footballdataGet("https://footballdata.io/api/v1/teams?q=$encoded&limit=20", key)
+        val candidates = footballdataArray(search)
+        val target = cleanTeamName(teamName)
+        var best: JSONObject? = null
+        var bestScore = 0
+        for (i in 0 until candidates.length()) {
+            val team = candidates.optJSONObject(i) ?: continue
+            val names = listOf(team.optString("team_name"), team.optString("team_name_clean"), team.optString("team_name_english"), team.optString("name"), team.optString("short_name"))
+                .filter { it.isNotBlank() }
+            val score = names.maxOfOrNull { candidateName ->
+                val candidate = cleanTeamName(candidateName)
+                when {
+                    candidate == target -> 100
+                    candidate.length >= 5 && target.length >= 5 && (candidate.contains(target) || target.contains(candidate)) -> 60
+                    else -> 0
+                }
+            } ?: 0
+            if (score > bestScore) { bestScore = score; best = team }
+        }
+        val team = best ?: throw IllegalStateException("Footballdata.io içinde '$teamName' takımı bulunamadı. Ücretsiz planın lig kapsamını kontrol edin.")
+        if (bestScore < 60) throw IllegalStateException("Footballdata.io takım eşleşmesi doğrulanamadı: $teamName")
+        val publicId = team.optInt("team_id", team.optInt("id", 0))
+        if (publicId <= 0) throw IllegalStateException("Footballdata.io takım kimliği alınamadı: $teamName")
+        val matchesJson = footballdataGet("https://footballdata.io/api/v1/teams/$publicId/matches?limit=25", key)
+        val matches = footballdataArray(matchesJson)
+        var scored = 0.0; var conceded = 0.0; var count = 0
+        val form = StringBuilder()
+        for (i in 0 until matches.length()) {
+            val match = matches.optJSONObject(i) ?: continue
+            val home = match.optJSONObject("home_team") ?: JSONObject()
+            val away = match.optJSONObject("away_team") ?: JSONObject()
+            val score = match.optJSONObject("score") ?: JSONObject()
+            val homeGoals = score.optInt("home", -1); val awayGoals = score.optInt("away", -1)
+            if (homeGoals < 0 || awayGoals < 0) continue
+            val status = match.optString("status", "").lowercase(Locale.ROOT)
+            if (status in listOf("scheduled", "upcoming", "not started", "live", "in_progress")) continue
+            val matchTeamId = home.optInt("team_id", -1).takeIf { it > 0 }
+                ?: away.optInt("team_id", -1).takeIf { it > 0 }
+            val isHome = if (matchTeamId != null) home.optInt("team_id", -1) == publicId
+                else cleanTeamName(home.optString("team_name", home.optString("name"))) == cleanTeamName(teamName)
+            val forGoals = if (isHome) homeGoals else awayGoals
+            val against = if (isHome) awayGoals else homeGoals
+            scored += forGoals; conceded += against; count++
+            form.append(if (forGoals > against) "G" else if (forGoals == against) "B" else "M").append(" ")
+            if (count >= 10) break
+        }
+        if (count == 0) return Stats(0.0, 0.0, 0, "Veri yok")
+        return Stats(scored / count, conceded / count, count, form.toString().trim())
     }
 
     private fun apiGet(url: String, key: String): JSONObject {
